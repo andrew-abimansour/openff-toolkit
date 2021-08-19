@@ -9,42 +9,40 @@ Test classes and function in module openff.toolkit.typing.engines.smirnoff.param
 
 """
 
-
-# ======================================================================
-# GLOBAL IMPORTS
-# ======================================================================
-
 import numpy
 import pytest
 from numpy.testing import assert_almost_equal
 from simtk import unit
 
 from openff.toolkit.topology import Molecule
-from openff.toolkit.typing.engines.smirnoff import SMIRNOFFVersionError
 from openff.toolkit.typing.engines.smirnoff.parameters import (
     BondHandler,
     ChargeIncrementModelHandler,
-    DuplicateParameterError,
     GBSAHandler,
     ImproperTorsionHandler,
-    IncompatibleParameterError,
     IndexedParameterAttribute,
     LibraryChargeHandler,
-    NotEnoughPointsForInterpolationError,
     ParameterAttribute,
     ParameterHandler,
     ParameterList,
-    ParameterLookupError,
     ParameterType,
     ProperTorsionHandler,
-    SMIRNOFFSpecError,
     VirtualSiteHandler,
     _linear_inter_or_extrapolate,
     _ParameterAttributeHandler,
     vdWHandler,
 )
-from openff.toolkit.utils import IncompatibleUnitError, detach_units
+from openff.toolkit.utils import detach_units
 from openff.toolkit.utils.collections import ValidatedList
+from openff.toolkit.utils.exceptions import (
+    DuplicateParameterError,
+    IncompatibleParameterError,
+    IncompatibleUnitError,
+    NotEnoughPointsForInterpolationError,
+    ParameterLookupError,
+    SMIRNOFFSpecError,
+    SMIRNOFFVersionError,
+)
 
 # ======================================================================
 # Test ParameterAttribute descriptor
@@ -2062,6 +2060,20 @@ class TestLibraryChargeHandler:
             lc_type = LibraryChargeHandler.LibraryChargeType(
                 smirks="[#6:1]-[#7:2]-[#6]", charge1=0.05 * unit.elementary_charge
             )
+
+    def test_library_charge_type_from_molecule(self):
+        mol = Molecule.from_smiles("CCO")
+
+        with pytest.raises(ValueError, match="missing partial"):
+            LibraryChargeHandler.LibraryChargeType.from_molecule(mol)
+
+        mol.partial_charges = numpy.linspace(-0.4, 0.4, 9) * unit.elementary_charge
+
+        library_charges = LibraryChargeHandler.LibraryChargeType.from_molecule(mol)
+
+        assert isinstance(library_charges, LibraryChargeHandler.LibraryChargeType)
+        assert library_charges.smirks == mol.to_smiles(mapped=True)
+        assert library_charges.charge == [*mol.partial_charges]
 
 
 class TestChargeIncrementModelHandler:

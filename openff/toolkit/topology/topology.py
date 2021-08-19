@@ -17,10 +17,6 @@ Class definitions to represent a molecular system and its chemical components
 
 """
 
-# =============================================================================================
-# GLOBAL IMPORTS
-# =============================================================================================
-
 import itertools
 from collections import OrderedDict
 from collections.abc import MutableMapping
@@ -30,7 +26,13 @@ from simtk import unit
 from simtk.openmm import app
 
 from openff.toolkit.typing.chemistry import ChemicalEnvironment
-from openff.toolkit.utils import MessageException
+from openff.toolkit.utils.exceptions import (
+    DuplicateUniqueMoleculeError,
+    InvalidBoxVectorsError,
+    InvalidPeriodicityError,
+    MissingUniqueMoleculesError,
+    NotBondedError,
+)
 from openff.toolkit.utils.serialization import Serializable
 from openff.toolkit.utils.toolkits import (
     ALLOWED_AROMATICITY_MODELS,
@@ -39,49 +41,6 @@ from openff.toolkit.utils.toolkits import (
     DEFAULT_AROMATICITY_MODEL,
     GLOBAL_TOOLKIT_REGISTRY,
 )
-
-# =============================================================================================
-# Exceptions
-# =============================================================================================
-
-
-class DuplicateUniqueMoleculeError(MessageException):
-    """
-    Exception for when the user provides indistinguishable unique molecules when trying to identify atoms from a PDB
-    """
-
-    pass
-
-
-class NotBondedError(MessageException):
-    """
-    Exception for when a function requires a bond between two atoms, but none is present
-    """
-
-    pass
-
-
-class InvalidBoxVectorsError(MessageException):
-    """
-    Exception for setting invalid box vectors
-    """
-
-
-class InvalidPeriodicityError(MessageException):
-    """
-    Exception for setting invalid periodicity
-    """
-
-
-class MissingUniqueMoleculesError(MessageException):
-    """
-    Exception for a when unique_molecules is required but not found
-    """
-
-
-# =============================================================================================
-# PRIVATE SUBROUTINES
-# =============================================================================================
 
 
 class _TransformedDict(MutableMapping):
@@ -212,6 +171,107 @@ class SortedDict(_TransformedDict):
         key = tuple(sorted(key))
         # Reverse the key if the first element is bigger than the last.
         return key
+
+
+class UnsortedDict(_TransformedDict):
+    ...
+
+
+class TagSortedDict(_TransformedDict):
+    """
+    A dictionary where keys, consisting of tuples of atom indices, are kept unsorted, but only allows one permutation of a key
+    to exist. Certain situations require that atom indices are not transformed in any
+    way, such as when the tagged order of a match is needed downstream. For example a
+    parameter using charge increments needs the ordering of the tagged match, and so
+    transforming the atom indices in any way will cause that information to be lost.
+
+    Because deduplication is needed, we still must avoid the expected situation
+    where we must not allow two permutations of the same atoms to coexist. For example,
+    a parameter may have matched the indices (2, 0, 1), however a parameter with higher
+    priority also matches the same indices, but the tagged order is (1, 0, 2). We need
+    to make sure both keys don't exist, or else two parameters will apply to
+    the same atoms. We allow the ability to query using either permutation and get
+    identical behavior. The defining feature here, then, is that the stored indices are
+    in tagged order, but one can supply any permutation and it will resolve to the
+    stored value/parameter.
+
+    As a subtle behavior, one must be careful if an external key is used that was not
+    supplied from the TagSortedDict object itself. For example:
+
+        >>> x = TagSortedDict({(2, 5, 0): 100})
+        >>> y = x[(5, 0, 2)]
+
+    The variable y will be 100, but this does not mean the tagged order is (5, 0, 2)
+    as it was supplied from the external tuple. One should either use keys only from
+    __iter__ (e.g.  `for k in x`) or one must transform the key:
+
+        >>> key = (5, 0, 2)
+        >>> y = x[key]
+        >>> key = x.key_transform(key)
+
+    Where `key` will now be `(2, 5, 0)`, as it is the key stored. One can overwrite
+    this key with the new one as expected:
+
+        >>> key = (5, 0, 2)
+        >>> x[key] = 50
+
+    Now the key `(2, 5, 0)` will no longer exist, as it was replaced with `(5, 0, 2)`.
+    """
+
+    def __init__(self, *args, **kwargs):
+
+        # Because keytransform is O(n) due to needing to check the sorted keys,
+        # we cache the sorted keys separately to make keytransform O(1) at
+        # the expense of storage. This is also better in the long run if the
+        # key is long and repeatedly sorting isn't a negligible cost.
+
+        # Set this before calling super init, since super will call the get/set
+        # methods implemented here as it populates self via args/kwargs,
+        # which will automatically populate _sorted
+        self._sorted = SortedDict()
+
+        super().__init__(*args, **kwargs)
+
+    def __setitem__(self, key, value):
+        """
+        Set the key to value, but only allow one permutation of key to exist. The
+        key argument will replace the old permutation:value if it exists.
+        """
+        key = tuple(key)
+        tr_key = self.__keytransform__(key)
+        if key != tr_key:
+            # this means our new key is a permutation of an existing, so we should
+            # replace it
+            del self.store[tr_key]
+        self.store[key] = value
+        # save the sorted version for faster keytransform
+        self._sorted[key] = key
+
+    def __keytransform__(self, key):
+        """Give the key permutation that is currently stored"""
+        # we check if there is a permutation clash by saving the sorted version of
+        # each key. If the sorted version of the key exists, then the return value
+        # corresponds to the explicit permutation we are storing in self (the public
+        # facing key). This permutation may or may not be the same as the key argument
+        # supplied. If the key is not present, then no transformation should be done
+        # and we should return the key as is.
+
+        # As stated in __init__, the alternative is to, on each call, sort the saved
+        # permutations and check if it is equal to the sorted supplied key. In this
+        # sense, self._sorted is a cache/lookup table.
+        key = tuple(key)
+        return self._sorted.get(key, key)
+
+    def key_transform(self, key):
+        key = tuple(key)
+        return self.__keytransform__(key)
+
+    def clear(self):
+        """
+        Clear the contents
+        """
+        self.store.clear()
+        self._sorted.clear()
 
 
 class ImproperDict(_TransformedDict):
@@ -1219,6 +1279,26 @@ class TopologyMolecule:
         )
 
     def nth_degree_neighbors(self, n_degrees: int):
+        """
+        Return canonicalized pairs of atoms whose shortest separation is `exactly` n bonds.
+        Only pairs with increasing atom indices are returned.
+        Parameters
+        ----------
+        n: int
+            The number of bonds separating atoms in each pair
+        Returns
+        -------
+        neighbors: iterator of tuple of TopologyAtom
+            Tuples (len 2) of atom that are separated by ``n`` bonds.
+        Notes
+        -----
+        The criteria used here relies on minimum distances; when there are multiple valid
+        paths between atoms, such as atoms in rings, the shortest path is considered.
+        For example, two atoms in "meta" positions with respect to each other in a benzene
+        are separated by two paths, one length 2 bonds and the other length 4 bonds. This
+        function would consider them to be 2 apart and would not include them if ``n=4`` was
+        passed.
+        """
         return self._convert_to_topology_atom_tuples(
             self._reference_molecule.nth_degree_neighbors(n_degrees=n_degrees)
         )
@@ -1865,6 +1945,26 @@ class Topology(Serializable):
                 yield amber_improper
 
     def nth_degree_neighbors(self, n_degrees: int):
+        """
+        Return canonicalized pairs of atoms whose shortest separation is `exactly` n bonds.
+        Only pairs with increasing atom indices are returned.
+        Parameters
+        ----------
+        n: int
+            The number of bonds separating atoms in each pair
+        Returns
+        -------
+        neighbors: iterator of tuple of TopologyAtom
+            Tuples (len 2) of atom that are separated by ``n`` bonds.
+        Notes
+        -----
+        The criteria used here relies on minimum distances; when there are multiple valid
+        paths between atoms, such as atoms in rings, the shortest path is considered.
+        For example, two atoms in "meta" positions with respect to each other in a benzene
+        are separated by two paths, one length 2 bonds and the other length 4 bonds. This
+        function would consider them to be 2 apart and would not include them if ``n=4`` was
+        passed.
+        """
         for topology_molecule in self._topology_molecules:
             for pair in topology_molecule.nth_degree_neighbors(n_degrees=n_degrees):
                 yield pair
@@ -1913,7 +2013,11 @@ class Topology(Serializable):
             self._topology_atom_indices = topology_atom_indices
 
     def chemical_environment_matches(
-        self, query, aromaticity_model="MDL", toolkit_registry=GLOBAL_TOOLKIT_REGISTRY
+        self,
+        query,
+        aromaticity_model="MDL",
+        unique=False,
+        toolkit_registry=GLOBAL_TOOLKIT_REGISTRY,
     ):
         """
         Retrieve all matches for a given chemical environment query.
@@ -1959,7 +2063,9 @@ class Topology(Serializable):
             # This will automatically attempt to match chemically identical atoms in
             # a canonical order within the Topology
             ref_mol_matches = ref_mol.chemical_environment_matches(
-                smarts, toolkit_registry=toolkit_registry
+                smarts,
+                unique=unique,
+                toolkit_registry=toolkit_registry,
             )
 
             if len(ref_mol_matches) == 0:
@@ -2226,7 +2332,11 @@ class Topology(Serializable):
         from simtk.openmm.app import Aromatic, Double, Single
         from simtk.openmm.app import Topology as OMMTopology
         from simtk.openmm.app import Triple
-        from simtk.openmm.app.element import Element as OMMElement
+
+        try:
+            from openmm.app.element import Element as OMMElement
+        except ImportError:
+            from simtk.openmm.app.element import Element as OMMElement
 
         omm_topology = OMMTopology()
 

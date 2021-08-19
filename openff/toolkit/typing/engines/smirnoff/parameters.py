@@ -13,16 +13,20 @@ New pluggable handlers can be created by creating subclasses of :class:`Paramete
 """
 
 __all__ = [
+    "DuplicateParameterError",
+    "DuplicateVirtualSiteTypeException",
+    "FractionalBondOrderInterpolationMethodUnsupportedError",
+    "IncompatibleParameterError",
+    "NonintegralMoleculeChargeException",
+    "NotEnoughPointsForInterpolationError",
+    "ParameterLookupError",
     "SMIRNOFFSpecError",
     "SMIRNOFFSpecUnimplementedError",
-    "IncompatibleParameterError",
-    "FractionalBondOrderInterpolationMethodUnsupportedError",
-    "NotEnoughPointsForInterpolationError",
-    "UnassignedValenceParameterException",
-    "UnassignedBondParameterException",
     "UnassignedAngleParameterException",
-    "DuplicateVirtualSiteTypeException",
-    "ParameterLookupError",
+    "UnassignedBondParameterException",
+    "UnassignedMoleculeChargeException",
+    "UnassignedProperTorsionParameterException",
+    "UnassignedValenceParameterException",
     "NonbondedMethod",
     "ParameterList",
     "ParameterType",
@@ -44,11 +48,6 @@ __all__ = [
     "VirtualSiteHandler",
 ]
 
-
-# =============================================================================================
-# GLOBAL IMPORTS
-# =============================================================================================
-
 import abc
 import copy
 import functools
@@ -61,14 +60,36 @@ from itertools import combinations
 
 from simtk import openmm, unit
 
-from openff.toolkit.topology import ImproperDict, SortedDict, Topology, ValenceDict
+from openff.toolkit.topology import (
+    ImproperDict,
+    TagSortedDict,
+    Topology,
+    UnsortedDict,
+    ValenceDict,
+)
 from openff.toolkit.topology.molecule import Molecule
+from openff.toolkit.topology.topology import NotBondedError
 from openff.toolkit.typing.chemistry import ChemicalEnvironment
 from openff.toolkit.utils.collections import ValidatedDict, ValidatedList
+from openff.toolkit.utils.exceptions import (
+    DuplicateParameterError,
+    DuplicateVirtualSiteTypeException,
+    FractionalBondOrderInterpolationMethodUnsupportedError,
+    IncompatibleParameterError,
+    NonintegralMoleculeChargeException,
+    NotEnoughPointsForInterpolationError,
+    ParameterLookupError,
+    SMIRNOFFSpecError,
+    SMIRNOFFSpecUnimplementedError,
+    UnassignedAngleParameterException,
+    UnassignedBondParameterException,
+    UnassignedMoleculeChargeException,
+    UnassignedProperTorsionParameterException,
+    UnassignedValenceParameterException,
+)
 from openff.toolkit.utils.toolkits import GLOBAL_TOOLKIT_REGISTRY
 from openff.toolkit.utils.utils import (
     IncompatibleUnitError,
-    MessageException,
     all_subclasses,
     attach_units,
     extract_serialized_units_from_dict,
@@ -80,98 +101,6 @@ from openff.toolkit.utils.utils import (
 # =============================================================================================
 
 logger = logging.getLogger(__name__)
-
-
-# ======================================================================
-# CUSTOM EXCEPTIONS
-# ======================================================================
-
-
-class SMIRNOFFSpecError(MessageException):
-    """
-    Exception for when data is noncompliant with the SMIRNOFF data specification.
-    """
-
-    pass
-
-
-class SMIRNOFFSpecUnimplementedError(MessageException):
-    """
-    Exception for when a portion of the SMIRNOFF specification is not yet implemented.
-    """
-
-
-class FractionalBondOrderInterpolationMethodUnsupportedError(MessageException):
-    """
-    Exception for when an unsupported fractional bond order interpolation assignment method is called.
-    """
-
-    pass
-
-
-class NotEnoughPointsForInterpolationError(MessageException):
-    """Exception for when less than two points are provided for interpolation"""
-
-    pass
-
-
-class IncompatibleParameterError(MessageException):
-    """
-    Exception for when a set of parameters is scientifically/technically incompatible with another
-    """
-
-    pass
-
-
-class UnassignedValenceParameterException(Exception):
-    """Exception raised when there are valence terms for which a ParameterHandler can't find parameters."""
-
-    pass
-
-
-class UnassignedBondParameterException(UnassignedValenceParameterException):
-    """Exception raised when there are bond terms for which a ParameterHandler can't find parameters."""
-
-    pass
-
-
-class UnassignedAngleParameterException(UnassignedValenceParameterException):
-    """Exception raised when there are angle terms for which a ParameterHandler can't find parameters."""
-
-    pass
-
-
-class UnassignedProperTorsionParameterException(UnassignedValenceParameterException):
-    """Exception raised when there are proper torsion terms for which a ParameterHandler can't find parameters."""
-
-    pass
-
-
-class UnassignedMoleculeChargeException(Exception):
-    """Exception raised when no charge method is able to assign charges to a molecule."""
-
-    pass
-
-
-class NonintegralMoleculeChargeException(Exception):
-    """Exception raised when the partial charges on a molecule do not sum up to its formal charge."""
-
-    pass
-
-
-class DuplicateParameterError(MessageException):
-    """Exception raised when trying to add a ParameterType that already exists"""
-
-
-class ParameterLookupError(MessageException):
-    """Exception raised when something goes wrong in a parameter lookup in
-    ParameterHandler.__getitem__"""
-
-
-class DuplicateVirtualSiteTypeException(Exception):
-    """Exception raised when trying to register two different virtual site classes with the same 'type'"""
-
-    pass
 
 
 # ======================================================================
@@ -2063,11 +1992,15 @@ class ParameterHandler(_ParameterAttributeHandler):
             The SMIRKS pattern (if str) or index (if int) of the parameter directly after where
             the new parameter will be added
 
-        Note that one of (parameter_kwargs, parameter) must be specified
-        Note that when `before` and `after` are both None, the new parameter will be appended
-            to the END of the parameter list.
-        Note that when `before` and `after` are both specified, the new parameter
-            will be added immediately after the parameter matching the `after` pattern or index.
+        Note the following behavior:
+          * Either `parameter_kwargs` or `parameter` must be specified.
+          * When `before` and `after` are both `None`, the new parameter will be appended
+            to the **END** of the parameter list.
+          * When `before` and `after` are both specified, the new parameter will be added immediately
+            after the parameter matching the `after` pattern or index.
+          * The order of parameters in a parameter list can have significant impacts on parameter assignment. For details,
+            see the [SMIRNOFF](https://open-forcefield-toolkit.readthedocs.io/en/latest/smirnoff.html#smirnoff-parameter-specification-is-hierarchical)
+            specification.
 
         Examples
         --------
@@ -2212,13 +2145,16 @@ class ParameterHandler(_ParameterAttributeHandler):
             self._parameter_type = parameter_type
             self._environment_match = environment_match
 
-    def find_matches(self, entity):
+    def find_matches(self, entity, unique=False):
         """Find the elements of the topology/molecule matched by a parameter type.
 
         Parameters
         ----------
         entity : openff.toolkit.topology.Topology
             Topology to search.
+        unique : bool, default=False
+            If False, SMARTS matching will enumerate every valid permutation of matching atoms.
+            If True, only one order of each unique match will be returned.
 
         Returns
         ---------
@@ -2229,9 +2165,14 @@ class ParameterHandler(_ParameterAttributeHandler):
 
         # TODO: Right now, this method is only ever called with an entity that is a Topology.
         #  Should we reduce its scope and have a check here to make sure entity is a Topology?
-        return self._find_matches(entity)
+        return self._find_matches(entity, unique=unique)
 
-    def _find_matches(self, entity, transformed_dict_cls=ValenceDict):
+    def _find_matches(
+        self,
+        entity,
+        transformed_dict_cls=ValenceDict,
+        unique=False,
+    ):
         """Implement find_matches() and allow using a difference valence dictionary.
         Parameters
         ----------
@@ -2242,6 +2183,10 @@ class ParameterHandler(_ParameterAttributeHandler):
             will determine how groups of atom indices are stored
             and accessed (e.g for angles indices should be 0-1-2
             and not 2-1-0).
+        unique : bool, default=False
+            If False, SMARTS matching will enumerate every valid permutation of matching atoms.
+            If True, only one order of each unique match will be returned.
+
         Returns
         ---------
         matches : `transformed_dict_cls` of ParameterHandlerMatch
@@ -2259,7 +2204,8 @@ class ParameterHandler(_ParameterAttributeHandler):
             matches_for_this_type = {}
 
             for environment_match in entity.chemical_environment_matches(
-                parameter_type.smirks
+                parameter_type.smirks,
+                unique=unique,
             ):
                 # Update the matches for this parameter type.
                 handler_match = self._Match(parameter_type, environment_match)
@@ -2811,7 +2757,13 @@ class BondHandler(ParameterHandler):
             # particle_indices = tuple([ atom.particle_index for atom in atoms ])
 
             # Ensure atoms are actually bonded correct pattern in Topology
-            self._assert_correct_connectivity(bond_match)
+            try:
+                self._assert_correct_connectivity(bond_match)
+            except NotBondedError as e:
+                smirks = bond_match.parameter_type.smirks
+                raise NotBondedError(
+                    f"While processing bond with SMIRKS {smirks}: " + e.msg
+                )
 
             # topology.assert_bonded(atoms[0], atoms[1])
             bond_params = bond_match.parameter_type
@@ -2987,7 +2939,13 @@ class AngleHandler(ParameterHandler):
             # Ensure atoms are actually bonded correct pattern in Topology
             # for (i, j) in [(0, 1), (1, 2)]:
             #     topology.assert_bonded(atoms[i], atoms[j])
-            self._assert_correct_connectivity(angle_match)
+            try:
+                self._assert_correct_connectivity(angle_match)
+            except NotBondedError as e:
+                smirks = angle_match.parameter_type.smirks
+                raise NotBondedError(
+                    f"While processing angle with SMIRKS {smirks}: " + e.msg
+                )
 
             if (
                 topology.is_constrained(atoms[0], atoms[1])
@@ -3137,7 +3095,13 @@ class ProperTorsionHandler(ParameterHandler):
         for (atom_indices, torsion_match) in torsion_matches.items():
             # Ensure atoms are actually bonded correct pattern in Topology
             # Currently does nothing
-            self._assert_correct_connectivity(torsion_match)
+            try:
+                self._assert_correct_connectivity(torsion_match)
+            except NotBondedError as e:
+                smirks = torsion_match.parameter_type.smirks
+                raise NotBondedError(
+                    f"While processing torsion with SMIRKS {smirks}: " + e.msg
+                )
 
             if torsion_match.parameter_type.k_bondorder is None:
                 # TODO: add a check here that we have same number of terms for
@@ -3333,7 +3297,7 @@ class ImproperTorsionHandler(ParameterHandler):
             tolerance_attrs=float_attrs_to_compare,
         )
 
-    def find_matches(self, entity):
+    def find_matches(self, entity, unique=False):
         """Find the improper torsions in the topology/molecule matched by a parameter type.
 
         Parameters
@@ -3348,7 +3312,9 @@ class ImproperTorsionHandler(ParameterHandler):
             matching the 4-tuple of atom indices in ``entity``.
 
         """
-        return self._find_matches(entity, transformed_dict_cls=ImproperDict)
+        return self._find_matches(
+            entity, transformed_dict_cls=ImproperDict, unique=unique
+        )
 
     def create_force(self, system, topology, **kwargs):
         # force = super(ImproperTorsionHandler, self).create_force(system, topology, **kwargs)
@@ -3368,7 +3334,15 @@ class ImproperTorsionHandler(ParameterHandler):
             # For impropers, central atom is atom 1
             # for (i, j) in [(0, 1), (1, 2), (1, 3)]:
             #     topology.assert_bonded(atom_indices[i], atom_indices[j])
-            self._assert_correct_connectivity(improper_match, [(0, 1), (1, 2), (1, 3)])
+            try:
+                self._assert_correct_connectivity(
+                    improper_match, [(0, 1), (1, 2), (1, 3)]
+                )
+            except NotBondedError as e:
+                smirks = improper_match.parameter_type.smirks
+                raise NotBondedError(
+                    f"While processing improper with SMIRKS {smirks}: " + e.msg
+                )
 
             improper = improper_match.parameter_type
 
@@ -3437,8 +3411,9 @@ class _NonbondedHandler(ParameterHandler):
         if len(existing) == 0:
             force = self._OPENMMTYPE()
             system.addForce(force)
-            # Create all particles.
-            for _ in topology.topology_particles:
+            # Create all atom particles. Virtual site particles are handled in
+            # in its own handler
+            for _ in topology.topology_atoms:
                 force.addParticle(0.0, 1.0, 0.0)
         else:
             force = existing[0]
@@ -3634,7 +3609,7 @@ class vdWHandler(_NonbondedHandler):
                 #                             "must be provided")
             else:
                 force.setNonbondedMethod(openmm.NonbondedForce.LJPME)
-                force.setCutoffDistance(9.0 * unit.angstrom)
+                force.setCutoffDistance(self.cutoff)
                 force.setEwaldErrorTolerance(1.0e-4)
 
         # If method is cutoff, then we currently support openMM's PME for periodic system and NoCutoff for nonperiodic
@@ -3889,7 +3864,7 @@ class ElectrostaticsHandler(_NonbondedHandler):
                     # There's no need to check for matching cutoff/tolerance here since both are hard-coded defaults
                 else:
                     force.setNonbondedMethod(openmm.NonbondedForce.PME)
-                    force.setCutoffDistance(9.0 * unit.angstrom)
+                    force.setCutoffDistance(self.cutoff)
                     force.setEwaldErrorTolerance(1.0e-4)
 
         # If vdWHandler set the nonbonded method to NoCutoff, then we don't need to change anything
@@ -3989,11 +3964,24 @@ class LibraryChargeHandler(_NonbondedHandler):
                     f"tagged atoms and charges"
                 )
 
+        @classmethod
+        def from_molecule(cls, molecule):
+            """Construct a LibraryChargeType from a molecule with existing partial charges."""
+            if molecule.partial_charges is None:
+                raise ValueError("Input molecule is missing partial charges.")
+
+            smirks = molecule.to_smiles(mapped=True)
+            charges = molecule.partial_charges
+
+            library_charge_type = cls(smirks=smirks, charge=charges)
+
+            return library_charge_type
+
     _TAGNAME = "LibraryCharges"  # SMIRNOFF tag name to process
     _INFOTYPE = LibraryChargeType  # info type to store
     _DEPENDENCIES = [vdWHandler, ElectrostaticsHandler]
 
-    def find_matches(self, entity):
+    def find_matches(self, entity, unique=True):
         """Find the elements of the topology/molecule matched by a parameter type.
 
         Parameters
@@ -4010,7 +3998,11 @@ class LibraryChargeHandler(_NonbondedHandler):
 
         # TODO: Right now, this method is only ever called with an entity that is a Topology.
         #  Should we reduce its scope and have a check here to make sure entity is a Topology?
-        return self._find_matches(entity, transformed_dict_cls=dict)
+        return self._find_matches(
+            entity,
+            transformed_dict_cls=dict,
+            unique=unique,
+        )
 
     def create_force(self, system, topology, **kwargs):
         force = super().create_force(system, topology, **kwargs)
@@ -4274,7 +4266,7 @@ class ChargeIncrementModelHandler(_NonbondedHandler):
             identical_attrs=string_attrs_to_compare + int_attrs_to_compare,
         )
 
-    def find_matches(self, entity):
+    def find_matches(self, entity, unique=False):
         """Find the elements of the topology/molecule matched by a parameter type.
 
         Parameters
@@ -4288,10 +4280,9 @@ class ChargeIncrementModelHandler(_NonbondedHandler):
             ``matches[particle_indices]`` is the ``ParameterType`` object
             matching the tuple of particle indices in ``entity``.
         """
-        # Using SortedDict here leads to the desired deduplication behavior, BUT it mangles the order
-        # of the atom indices in the keys. Thankfully, the Match objects that are values in `matches` contain
-        # `match.environment_match.topology_atom_indices`, which has the tuple in the correct order
-        matches = self._find_matches(entity, transformed_dict_cls=SortedDict)
+        matches = self._find_matches(
+            entity, transformed_dict_cls=TagSortedDict, unique=unique
+        )
         return matches
 
     def create_force(self, system, topology, **kwargs):
@@ -4955,7 +4946,7 @@ class VirtualSiteHandler(_NonbondedHandler):
         else:
 
             raise SMIRNOFFSpecError(
-                'VirtualSiteHander exclusion policy not understood. Set "exclusion_policy" to one of {}'.format(
+                'VirtualSiteHandler exclusion policy not understood. Set "exclusion_policy" to one of {}'.format(
                     _exclusion_policies_implemented
                 )
             )
@@ -5387,7 +5378,7 @@ class VirtualSiteHandler(_NonbondedHandler):
     def _find_matches(
         self,
         entity,
-        transformed_dict_cls=ValenceDict,
+        transformed_dict_cls=UnsortedDict,
         use_named_slots=False,
         expand_permutations=False,
     ):
@@ -5568,7 +5559,7 @@ class VirtualSiteHandler(_NonbondedHandler):
         # somewhere else
 
         logger.debug("Creating OpenFF virtual site representations...")
-        topology = self._create_openff_virtual_sites(topology)
+        self.create_openff_virtual_sites(topology)
 
         # The toolkit now has a representation of the vsites in the topology,
         # and here we create the OpenMM parameters/objects/exclusions
@@ -5600,7 +5591,7 @@ class VirtualSiteHandler(_NonbondedHandler):
             other_handler, identical_attrs=string_attrs_to_compare
         )
 
-    def find_matches(self, entity, expand_permutations=True):
+    def find_matches(self, entity, expand_permutations=True, unique=False):
         """Find the virtual sites in the topology/molecule matched by a
         parameter type.
 
@@ -5616,9 +5607,13 @@ class VirtualSiteHandler(_NonbondedHandler):
             matching the n-tuple of atom indices in ``entity``.
 
         """
+        if unique:
+            raise NotImplementedError(
+                "`unique=True` not implemented in VirtualSiteHandler"
+            )
         return self._find_matches(
             entity,
-            transformed_dict_cls=dict,
+            transformed_dict_cls=UnsortedDict,
             use_named_slots=True,
             expand_permutations=expand_permutations,
         )
@@ -5696,7 +5691,15 @@ class VirtualSiteHandler(_NonbondedHandler):
 
         return combined_orientations
 
-    def _create_openff_virtual_sites(self, topology):
+    def create_openff_virtual_sites(self, topology):
+        """
+        Modifies the input topology to contain VirtualSites assigned by this handler.
+
+        Parameters
+        ----------
+        topology : openff.toolkit.topology.Topology
+            Topology to add virtual sites to.
+        """
 
         for molecule in topology.reference_molecules:
 
@@ -5706,7 +5709,7 @@ class VirtualSiteHandler(_NonbondedHandler):
             FrozenMolecules. However, the signature is different, as they return
             different results.
 
-            Also, we are using a topology to retreive the indices for the
+            Also, we are using a topology to retrieve the indices for the
             matches, but then using those indices as a direct `Atom` object
             lookup in the molecule. This is unsafe because there is no reason to
             believe that the indices should be consistent. However, there is
@@ -5725,8 +5728,6 @@ class VirtualSiteHandler(_NonbondedHandler):
             # for the virtual site to represent multiple particles
             for vsite_type, orientations in virtual_sites:
                 vsite_type.add_virtual_site(molecule, orientations, replace=True)
-
-        return topology
 
     def _create_openmm_virtual_sites(self, system, force, topology, ref_mol):
 

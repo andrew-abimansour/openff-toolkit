@@ -22,14 +22,12 @@ __all__ = [
     "ParameterHandlerRegistrationError",
     "SMIRNOFFVersionError",
     "SMIRNOFFAromaticityError",
+    "SMIRNOFFParseError",
     "ParseError",
+    "PartialChargeVirtualSitesError",
     "ForceField",
 ]
 
-
-# =============================================================================================
-# GLOBAL IMPORTS
-# =============================================================================================
 
 import copy
 import logging
@@ -46,13 +44,21 @@ from openff.toolkit.typing.engines.smirnoff.parameters import (
     ParameterHandler,
 )
 from openff.toolkit.typing.engines.smirnoff.plugins import load_handler_plugins
+from openff.toolkit.utils.exceptions import (
+    ParameterHandlerRegistrationError,
+    ParseError,
+    PartialChargeVirtualSitesError,
+    SMIRNOFFAromaticityError,
+    SMIRNOFFParseError,
+    SMIRNOFFVersionError,
+)
 from openff.toolkit.utils.utils import (
-    MessageException,
     all_subclasses,
     convert_0_1_smirnoff_to_0_2,
     convert_0_2_smirnoff_to_0_3,
     convert_all_quantities_to_string,
     convert_all_strings_to_quantity,
+    requires_package,
 )
 
 # =============================================================================================
@@ -133,38 +139,6 @@ def get_available_force_fields(full_paths=False):
 MAX_SUPPORTED_VERSION = (
     "1.0"  # maximum version of the SMIRNOFF spec supported by this SMIRNOFF force field
 )
-
-
-class ParameterHandlerRegistrationError(MessageException):
-    """
-    Exception for errors in ParameterHandler registration
-    """
-
-    pass
-
-
-class SMIRNOFFVersionError(MessageException):
-    """
-    Exception thrown when an incompatible SMIRNOFF version data structure in attempted to be read.
-    """
-
-    pass
-
-
-class SMIRNOFFAromaticityError(MessageException):
-    """
-    Exception thrown when an incompatible SMIRNOFF aromaticity model is checked for compatibility.
-    """
-
-    pass
-
-
-class ParseError(MessageException):
-    """
-    Error for when a SMIRNOFF data structure is not parseable by a ForceField
-    """
-
-    pass
 
 
 # =============================================================================================
@@ -967,7 +941,9 @@ class ForceField:
         elif "SMIRFF" in smirnoff_data:
             version = smirnoff_data["SMIRFF"]["version"]
         else:
-            raise ParseError("'version' attribute must be specified in SMIRNOFF tag")
+            raise SMIRNOFFParseError(
+                "'version' attribute must be specified in SMIRNOFF tag"
+            )
 
         self._check_smirnoff_version_compatibility(str(version))
         # Convert 0.1 spec files to 0.3 SMIRNOFF data format by converting
@@ -984,7 +960,7 @@ class ForceField:
 
         # Ensure that SMIRNOFF is a top-level key of the dict
         if not ("SMIRNOFF" in smirnoff_data):
-            raise ParseError(
+            raise SMIRNOFFParseError(
                 "'SMIRNOFF' must be a top-level key in the SMIRNOFF object model"
             )
 
@@ -995,7 +971,7 @@ class ForceField:
             self.aromaticity_model = aromaticity_model
 
         elif self._aromaticity_model is None:
-            raise ParseError(
+            raise SMIRNOFFParseError(
                 "'aromaticity_model' attribute must be specified in SMIRNOFF "
                 "tag, or contained in a previously-loaded SMIRNOFF data source"
             )
@@ -1094,13 +1070,14 @@ class ForceField:
             # Finally, search in openff/toolkit/data/.
             # TODO: Remove this when smirnoff99Frosst 1.0.9 will be released.
             searched_dirs_paths.append(get_data_file_path(""))
+            searched_dirs_paths.append(get_data_file_path("test_forcefields"))
+            searched_dirs_paths.append(get_data_file_path("test_forcefields/old"))
 
             # Determine the actual path of the file.
             # TODO: What is desired toolkit behavior if two files with the desired name are available?
-            dir_paths = [pathlib.Path(path) for path in searched_dirs_paths]
-            for dir_path in dir_paths:
-                for file_path in dir_path.glob("**/*.offxml"):
-                    # Cannot compare filenames alone, source can be test_forcefield/...
+            for dir_path in searched_dirs_paths:
+                dir_path = pathlib.Path(dir_path)
+                for file_path in dir_path.glob("*.offxml"):
                     if str(file_path).lower().endswith(source.lower()):
                         source = str(file_path.absolute())
                         break
@@ -1117,15 +1094,15 @@ class ForceField:
             try:
                 smirnoff_data = parameter_io_handler.parse_file(source)
                 return smirnoff_data
-            except ParseError as e:
+            except SMIRNOFFParseError as e:
                 exception_msg = e.msg
             except (FileNotFoundError, OSError):
                 # If this is not a file path or a file handle, attempt parsing as a string.
                 try:
                     smirnoff_data = parameter_io_handler.parse_string(source)
                     return smirnoff_data
-                except ParseError as e:
-                    exception_msg = e.msg
+                except SMIRNOFFParseError as e:
+                    exception_msg = e.args[0]
 
         # If we haven't returned by now, the parsing was unsuccessful
         valid_formats = [
@@ -1305,8 +1282,12 @@ class ForceField:
         if topology.box_vectors is not None:
             system.setDefaultPeriodicBoxVectors(*topology.box_vectors)
 
-        # Add particles (both atoms and virtual sites) with appropriate masses
-        for atom in topology.topology_particles:
+        # Add atom particles with appropriate masses
+        # Virtual site particle creation is handled in the parameter handler
+        # create_force call
+        # This means that even though virtual sites may have been created via
+        # the molecule API, an empty VirtualSites tag must exist in the FF
+        for atom in topology.topology_atoms:
             system.addParticle(atom.atom.mass)
 
         # Determine the order in which to process ParameterHandler objects in order to satisfy dependencies
@@ -1408,18 +1389,18 @@ class ForceField:
 
         """
         raise NotImplementedError
-        # import parmed
-        # TODO: Automagically handle expansion of virtual sites? Or is Topology supposed to do that?
 
-        # Create OpenMM System
-        # system = self.create_openmm_system(
-        #    topology, **kwargs)
+    @requires_package("openff.interchange")
+    @requires_package("mdtraj")
+    def _to_interchange(self, topology, box=None):
+        """
+        Create an Interchange object from a ForceField, Topology, and (optionally) box vectors.
 
-        # Create a ParmEd Structure object
-        # structure = parmed.openmm.topsystem.load_topology(
-        #    topology.to_openmm(), system, positions)
-        #
-        # return structure
+        WARNING: This API and functionality are experimental and not suitable for production.
+        """
+        from openff.interchange.components.interchange import Interchange
+
+        return Interchange.from_smirnoff(force_field=self, topology=topology, box=box)
 
     def label_molecules(self, topology):
         """Return labels for a list of molecules corresponding to parameters from this force field.
@@ -1504,6 +1485,71 @@ class ForceField:
             )
             raise KeyError(msg)
         return ph_class
+
+    def get_partial_charges(self, molecule, **kwargs):
+        """Generate the partial charges for the given molecule in this force field.
+
+        Parameters
+        ----------
+        molecule : :class:`openff.toolkit.topology.Molecule`
+            The ``Molecule`` corresponding to the system to be parameterized
+        toolkit_registry : :class:`openff.toolkit.utils.toolkits.ToolkitRegistry`, default=GLOBAL_TOOLKIT_REGISTRY
+            The toolkit registry to use for operations like conformer generation and
+            partial charge assignment.
+
+        Returns
+        -------
+        charges : ``simtk.unit.Quantity`` with shape ``(n_atoms,)`` and dimensions of charge
+            The partial charges of the provided molecule in this force field.
+
+        Raises
+        ------
+        PartialChargeVirtualSitesError
+            If the ``ForceField`` applies virtual sites to the ``Molecule``.
+            ``get_partial_charges`` cannot identify which virtual site charges
+            may belong to which atoms in this case.
+
+        Other exceptions
+            As any ``ParameterHandler`` may in principle modify charges, the entire
+            force field must be applied to the molecule to produce the charges.
+            Calls to this method from incorrectly or incompletely specified ``ForceField``
+            objects thus may raise an exception.
+
+        Examples
+        --------
+
+        >>> from openff.toolkit.typing.engines.smirnoff import ForceField, Molecule
+        >>> ethanol = Molecule.from_smiles('CCO')
+        >>> force_field = ForceField('test_forcefields/test_forcefield.offxml')
+
+        Assign partial charges to the molecule according to the force field:
+
+        >>> ethanol.partial_charges = force_field.get_partial_charges(ethanol)
+
+        Use the assigned partial charges when creating an OpenMM ``System``:
+
+        >>> topology = ethanol.to_topology()
+        >>> system = forcefield.create_openmm_system(
+        ...    topology,
+        ...    charge_from_molecules=[ethanol]
+        ... )
+
+        This is especially useful when you want to create multiple systems
+        with the same molecule or molecules, as it allows the expensive
+        charge calculation to be cached.
+
+        """
+        _, top_with_charges = self.create_openmm_system(
+            molecule.to_topology(), return_topology=True, **kwargs
+        )
+
+        if top_with_charges.n_topology_virtual_sites != 0:
+            raise PartialChargeVirtualSitesError(
+                "get_partial_charges is not supported on molecules with virtual sites"
+            )
+
+        charges = [*top_with_charges.reference_molecules][0].partial_charges
+        return charges
 
     def __getitem__(self, val):
         """
