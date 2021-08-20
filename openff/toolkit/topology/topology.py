@@ -1232,7 +1232,7 @@ class TopologyMolecule:
         of these three terms will always return a consistent energy.
 
         For more details on the use of three-fold ('trefoil') impropers, see
-        https://open-forcefield-toolkit.readthedocs.io/en/latest/smirnoff.html#impropertorsions
+        https://openforcefield.github.io/standards/standards/smirnoff/#impropertorsions
 
 
 
@@ -1892,7 +1892,7 @@ class Topology(Serializable):
         of these three terms will always return a consistent energy.
 
         For more details on the use of three-fold ('trefoil') impropers, see
-        https://open-forcefield-toolkit.readthedocs.io/en/latest/smirnoff.html#impropertorsions
+        https://openforcefield.github.io/standards/standards/smirnoff/#impropertorsions
 
         .. todo:: Offer a way to do the keytransform and get the final 3 orderings in this
                   method? How can we keep this logic synced up with the parameterization
